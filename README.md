@@ -1,5 +1,10 @@
 # Refactored-SFXR
-A refactored version of the SFXR program for use as a library; made to be more human readable, commented, midi-compatible, and modular.
+A refactored version of the SFXR program for use as a library; made to be more human readable, commented, and modular.
+
+Includes helper functions to set sound frequency based on midi key.
+
+TODO: change settings to all human units and emulation-units in the model only
+TODO: remove C++ make it C
 
 Example of saving a file:
 
