@@ -51,44 +51,58 @@ struct Settings
 	float get_frequency_baseHz() const { float v = frequency.base; return internalToHz * (v * v + 0.001);  }
 	void  set_frequency_baseHz(float v) { frequency.base = std::sqrt( v / internalToHz - 0.001);  }
 
-	struct {
-		float attack{},
-		sustain{0.6641}, // 1 sec
-		decay{0.4}, punch{};
+		struct {
+		float attack{}, // Attack is the beginning of the sound, longer attack means a smoother start.
+		sustain{0.6641}, // (1 sec) Sustain is how long the volume is held constant before fading out.
+		decay{0.4}, // Decay is the fade-out time.
+		punch{};
 	} envelope;
 
 	struct
 	{
-		float base{0.35173364},  // 440 Hz
-		limit{}, slide{}, deltaSlide{};
+		float base{0.35173364},  // 440 Hz // Start frequency, has a large impact on the overall sound.
+		limit{}, //  represents a cutoff that stops all sound if it's passed during a downward slide.
+		slide{}, // Slide sets the speed at which the frequency should be swept (up or down).
+		deltaSlide{}; // Delta slide is the "slide of slide", or rate of change in the slide speed.
 	} frequency;
 
-	struct
+	struct // Vibrato depth/speed makes for an oscillating frequency effect at various strengths and rates.
 	{
 		float strength{}, speed{}, delay{};
 	} vibrato;
 
 	struct
 	{
+		// Repeat speed, when not zero, causes the frequency and duty parameters to be reset at regular
+		// intervals while the envelope and filter continue unhindered.
+		// This can make for some interesting pulsating effects.
 		float speed{};
 	} retrigger;
 
 	struct
 	{
-		float frequency{}, speed{};
+		float frequency{}, // pitch change (up or down)
+		speed{};  // Speed indicates time to wait before changing the pitch.
 	} arpeggiation;
-	
-// this is only used by square wave thigns
+
+// two parameters specific to the squarewave waveform
 	struct
 	{
-		float cycle{}, sweep{};
+// The duty cycle of a square describes its shape in terms of how large the positive vs negative sections are.
+		float cycle{},
+		sweep{};
 	} duty;
 
 	struct
 	{
+		// Flanger offset overlays a delayed copy of the audio stream on top of itself
+		// resulting in a kind of tight reverb or sci-fi effect.
+		// This parameter can also be swept like many others.
+
 		float offset{}, sweep{};
 	} flanger;
 
+// control post processing effects
 	struct
 	{
 		float frequency{}, ramp{};
@@ -98,7 +112,6 @@ struct Settings
 	{
 		float resonance{}, frequency{1.f}, ramp{};
 	} lowPassFilter;
-
 };
 
  // this remains constant during sound generation
