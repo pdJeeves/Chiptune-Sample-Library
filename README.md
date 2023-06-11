@@ -1,4 +1,4 @@
-# Chiptune Sound Generating library for C
+# Chiptune Sound Library: SFXR
 
 This is a fork of the NES-style sound effect generator made by Dr Petterr (http://www.drpetter.se). I have redesigned it to be a C library rather than a standalone program. So you can use it to create new sound effects as needed in your game! 
 
