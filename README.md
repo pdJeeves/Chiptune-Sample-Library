@@ -1,26 +1,33 @@
-# Refactored-SFXR
-A refactored version of the SFXR program for use as a library; made to be more human readable, commented, and modular.
+# Chiptune Sound Generating library for C
 
-Includes helper functions to set sound frequency based on midi key.
+This is a fork of the NES-style sound effect generator made by Dr Petterr (http://www.drpetter.se). I have redesigned it to be a C library rather than a standalone program. So you can use it to create new sound effects as needed in your game! 
 
-TODO: change settings to all human units and emulation-units in the model only
-TODO: remove C++ make it C
+I included comments wherever i figured something out and tried to make it a lot clearer than the original. 
+
+Includes helper functions to set sound frequency based on midi key!
 
 Example of saving a file:
 
-	sfxr::Settings::Coin().ExportWAV("coin.wav");
+	// the library never calls malloc, there is no memory management everything is stack based. 
+	sfxr_Settings settings;
+	sfxr_Coin(&settings)
+	sfxr_ExportWAV(&settings, "coin.wav");
   
-Example of creating a new sound with FMOD:
+Example of creating a new sound with FMOD using C++:
 
-	FMOD::Sound * CreateSound(FMOD::System * system, sfxr::Settings const& settings)
+If you want to use unity then combine this example with this page here: https://www.fmod.com/docs/2.02/unity/examples-video-playback.html
+
+	FMOD::Sound * CreateSound(FMOD::System * system, sfxr_Settings const& settings)
 	{
 		FMOD::Sound * sound = nullptr;
 		// the model is data used during sound generation that never changes, it can be used for multiple generators
 		// you're free to change the settings once you have the model
-		sfxr::Model model(settings);
+		sfxr_Model model;
+		sfxr_ModelInit(&model, settings);
 		// the data is stuff that does change during sound generation, it can't be used among multiple instances
 		// it maintains a reference to the model, so the model can't be deleted until all the data is also.
-		sfxr::Data  data(model);
+		sfxr_Data  data;
+		sfxr_DataInit(&data, &model);
 		
 		std::vector<float> _samples;
 		
@@ -29,7 +36,7 @@ Example of creating a new sound with FMOD:
 		{
 			auto size = _samples.size();
 			_samples.resize(_samples.size() + 44100);
-			auto written = data.SynthSample(44100, _samples.data());
+			auto written = sfxr_DataSynthSample(&data, 44100, _samples.data());
 
 			if(written < 44100)
 			{
