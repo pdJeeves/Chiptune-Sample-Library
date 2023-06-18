@@ -139,9 +139,9 @@ int sfxr_DataReset(sfxr_Data * data)
 	return 0;
 }
 
-int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, uint16_t * short_buffer)
+int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer)
 {
-	if(data == 0L || data->model == 0L) return -1;
+	if(data == 0L || data->model == 0L || buffer == 0L) return -1;
 	sfxr_Model const* model = data->model;
 
 	int i;
@@ -273,19 +273,9 @@ int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, uint16_t *
 		}
 		ssample= ssample * 0.125f;
 
-		if(buffer!= nullptr)
-		{
-			if(ssample>1.0f) ssample= 1.0f;
-			if(ssample<-1.0f) ssample= -1.0f;
-			*buffer++= ssample;
-		}
-
-		if(short_buffer != nullptr)
-		{
-			if(ssample>1.0f) ssample= 1.0f;
-			if(ssample<-1.0f) ssample= -1.0f;
-			*short_buffer++= ssample * 32000;
-		}
+		if(ssample>1.0f) ssample= 1.0f;
+		if(ssample<-1.0f) ssample= -1.0f;
+		*buffer++= ssample;
 	}
 
 	return i;
