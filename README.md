@@ -14,7 +14,7 @@ Example of saving a file:
   
 Example of creating a new sound with FMOD using C++:
 
-If you want to use unity then combine this example with this page here: https://www.fmod.com/docs/2.02/unity/examples-video-playback.html
+If you want to use unity then combine this example [with this page here](https://www.fmod.com/docs/2.02/unity/examples-video-playback.html)
 
 	FMOD::Sound * CreateSound(FMOD::System * system, sfxr_Settings const& settings)
 	{
