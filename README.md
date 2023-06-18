@@ -28,12 +28,12 @@ If you want to use unity then combine this example [with this page here](https:/
 		sfxr_Data  data;
 		sfxr_DataInit(&data, &model);
 		
-		std::vector<uint16_t> _samples;
+		std::vector<float> _samples;
 	// compute size of buffer we need 
 		_samples.resize(sfxr_ComputeRemainingSamples(&data));
 		
-	// synth as uint16 samples
-		sfxr_DataSynthSample(&data, _samples.size(), nullptr /* float samples */, _samples.data() /* short samples */);
+	// synth as float samples, this doesn't have to be all at once, the data is like an iterator in the sample!
+		sfxr_DataSynthSample(&data, _samples.size(), _samples.data());
 		
 	// done with this library now we use FMOD!!
 		
@@ -50,7 +50,7 @@ If you want to use unity then combine this example [with this page here](https:/
 		info.defaultfrequency = 44100;
 		
 	// humans can't actually hear a difference between float and short data (limit of hearing is 12 bits so 16 is already padded)
-		info.format = FMOD_SOUND_FORMAT_PCM16;  
+		info.format = FMOD_SOUND_FORMAT_PCMFLOAT;  
 		
 		system->createSound(
 			nullptr,
