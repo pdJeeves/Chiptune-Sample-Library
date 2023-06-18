@@ -602,7 +602,7 @@ int sfxr_ExportWAV(sfxr_Settings const* s, int wav_bits, int sample_rate, const 
 	no_samples = (no_samples + 255) & 0xFFFFFFF0;
 	float * buffer = malloc(no_samples * sizeof(float));
 
-	int samples = sfxr_DataSynthSample(&data, no_samples, buffer, nullptr);
+	int samples = sfxr_DataSynthSample(&data, no_samples, buffer);
 // clear out tail.
 	memset(&buffer[samples], 0, (no_samples-samples)*sizeof(float));
 	samples = no_samples;
