@@ -1,7 +1,7 @@
 #include "sfxr_soundeffects.h"
 #include <stdint.h>
 #include <assert.h>
-#include <stdio.h>
+#include <stdio.h>R
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -281,7 +281,7 @@ int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer)
 	return i;
 }
 
-int sfxr_ComputeNoSamples(sfxr_Data const*__restrict data)
+int sfxr_ComputeRemainingSamples(sfxr_Data const*__restrict data)
 {
 	if(data == 0L || data->model == 0L) return -1;
 	if(data->env_stage >= ENV_STAGES) return 0;
@@ -597,7 +597,7 @@ int sfxr_ExportWAV(sfxr_Settings const* s, int wav_bits, int sample_rate, const 
 	sfxr_ModelInit(&model, s);
 	sfxr_DataInit(&data, &model);
 
-	int no_samples = sfxr_ComputeNoSamples(&data);
+	int no_samples = sfxr_ComputeRemainingSamples(&data);
 // padd a bit cause some audio players will cut off it samples is too short
 	no_samples = (no_samples + 255) & 0xFFFFFFF0;
 	float * buffer = malloc(no_samples * sizeof(float));
