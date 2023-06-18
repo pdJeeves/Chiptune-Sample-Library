@@ -1,14 +1,19 @@
 #include "sfxr_soundeffects.h"
+#include <stdint.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
+#if INCLUDE_WAV_EXPORT
+#include <stdarg.h>
+#endif
+
 enum
 {
 	SAMPLE_RATE = 44100,
-
+	ENV_STAGES = sizeof(((sfxr_Model*)0)->env_length) / sizeof(int)
 };
 
 // __restrict is not true
@@ -134,7 +139,7 @@ int sfxr_DataReset(sfxr_Data * data)
 	return 0;
 }
 
-int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer)
+int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, uint16_t * short_buffer)
 {
 	if(data == 0L || data->model == 0L) return -1;
 	sfxr_Model const* model = data->model;
@@ -274,6 +279,13 @@ int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer)
 			if(ssample<-1.0f) ssample= -1.0f;
 			*buffer++= ssample;
 		}
+
+		if(short_buffer != nullptr)
+		{
+			if(ssample>1.0f) ssample= 1.0f;
+			if(ssample<-1.0f) ssample= -1.0f;
+			*short_buffer++= ssample * 32000;
+		}
 	}
 
 	return i;
@@ -281,24 +293,69 @@ int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer)
 
 int sfxr_ComputeNoSamples(sfxr_Data const*__restrict data)
 {
-
 	if(data == 0L || data->model == 0L) return -1;
+	if(data->env_stage >= ENV_STAGES) return 0;
+
 	sfxr_Model const *__restrict model = data->model;
 
 	int playing_sample = data->playing_sample;
 	int arp_limit = data->arp_limit;
 	int rep_time = data->rep_time;
 	int arp_time = data->arp_time;
-	int env_stage = data->env_stage;
-	int env_time = data->env_time;
 	double fperiod = data->fperiod;
 	double fslide = data->fslide;
 
-	int i = 0;
-	do
+	// add 1 to env_length at each step here b/c when sampling we use > not >=.
+
+	size_t cur_env_elapsed = data->env_time;
+	for(int i = 0; i < data->env_stage; ++i)
 	{
-		rep_time++;
-		if(model->rep_limit!= 0 && rep_time>= model->rep_limit)
+		cur_env_elapsed += model->env_length[i]+1;
+	}
+
+	size_t limits[4];
+	size_t max_env_remaining = ((size_t)model->env_length[0] + model->env_length[1] + model->env_length[2] + 3) - cur_env_elapsed;
+
+	size_t i = 0;
+	while(playing_sample && i < max_env_remaining)
+	{
+		assert(i < max_env_remaining);
+		assert(model->rep_limit == 0 || rep_time < model->rep_limit);
+		assert(arp_limit == 0 || arp_time < arp_limit);
+
+		limits[0] = max_env_remaining - i;
+		limits[1] = model->rep_limit == 0? ~(size_t)0 : (size_t)(model->rep_limit - rep_time);
+		limits[2] = arp_limit == 0? ~(size_t)0 : (size_t)(arp_limit - arp_time);
+
+// which limit will we hit first?
+		int which = limits[0] < limits[1]? 0 : 1;
+		which = limits[which] < limits[2]? which : 2;
+
+		if(model->fdslide >= 0 && fslide >= 1)
+			limits[3] = ~(size_t)0;
+		else
+		{
+// todo: find a faster way
+			for(limits[3] = 0; limits[3] < limits[which]; ++limits[3])
+			{
+				fslide += model->fdslide;
+				fperiod *= fslide;
+				if(fperiod > model->fmaxperiod)
+					break;
+			}
+		}
+
+		which = limits[which] <= limits[3]? which : 3;
+
+		i		 += limits[which];
+		rep_time += limits[which];
+		arp_time += limits[which];
+
+		switch(which)
+		{
+		default:
+			return i;
+		case 1:
 		{
 			rep_time= 0;
 
@@ -309,83 +366,239 @@ int sfxr_ComputeNoSamples(sfxr_Data const*__restrict data)
 			arp_limit= (int)(pow(1.0f-model->arpeggiation.speed, 2.0f)*20000+32);
 			if(model->arpeggiation.speed== 1.0f)
 				arp_limit= 0;
-		}
-
-		arp_time++;
-		if(arp_limit != 0 && arp_time >= arp_limit)
+		}	break;
+		case 2:
 		{
 			arp_limit = 0;
 			fperiod *= model->arp_mod;
-		}
-
-		fslide += model->fdslide;
-		fperiod *= fslide;
-		if(fperiod > model->fmaxperiod)
+		} break;
+		case 3:
 		{
 			fperiod = model->fmaxperiod;
 			if(model->frequency.limit > 0.0f)
-				playing_sample= 0;
+				return i;
+		} break;
 		}
-
-		env_time++;
-		if(env_time > model->env_length[env_stage])
-		{
-			env_time= 0;
-			env_stage++;
-			if(env_stage== 3)
-				playing_sample= 0;
-		}
-	} while(++i && playing_sample);
+	}
 
 	return i;
 }
 
 #if INCLUDE_WAV_EXPORT
-int sfxr_ExportWAV(sfxr_Settings const* s, const char* filename)
+
+struct sfxr_WavHeader
 {
-	enum
-	{
-		wav_freq = SAMPLE_RATE,
-		wav_bits = 16,
-	};
+	char RIFF[4];
+	unsigned int fileSize;
+	char WAVE[4];
+	char fmt_[4];
+
+	unsigned int chunkSize0;
+	unsigned short compressionCode;
+	unsigned short channels;
+	unsigned int   sampleRate;
+	unsigned int   bytesSec;
+	unsigned short blockAlign;
+	unsigned short bitsPerSample;
+
+	char data[4];
+	unsigned int chunkSize1;
+};
+
+// here for reference, only uncompressed is used. (found in ffmpeg)
+enum
+{
+	WAVE_FORMAT_UNKNOWN                    = 0x0000,	// Microsoft Corporation
+	WAVE_FORMAT_UNCOMPRESSED               = 0x0001,	// Microsoft Corporation
+	WAVE_FORMAT_ADPCM                      = 0x0002,	// Microsoft Corporation
+	WAVE_FORMAT_IEEE_FLOAT                 = 0x0003,	// Microsoft Corporation
+	WAVE_FORMAT_VSELP                      = 0x0004,	// Compaq Computer Corp.
+	WAVE_FORMAT_IBM_CVSD                   = 0x0005,	// IBM Corporation
+	WAVE_FORMAT_ALAW                       = 0x0006,	// Microsoft Corporation
+	WAVE_FORMAT_MULAW                      = 0x0007,	// Microsoft Corporation
+	WAVE_FORMAT_DTS                        = 0x0008,	// Microsoft Corporation
+	WAVE_FORMAT_OKI_ADPCM                  = 0x0010,	// OKI
+	WAVE_FORMAT_DVI_ADPCM                  = 0x0011,	// Intel Corporation
+	WAVE_FORMAT_IMA_ADPCM                  = (WAVE_FORMAT_DVI_ADPCM),	//  Intel Corporation
+	WAVE_FORMAT_MEDIASPACE_ADPCM           = 0x0012,	// Videologic
+	WAVE_FORMAT_SIERRA_ADPCM               = 0x0013,	// Sierra Semiconductor Corp
+	WAVE_FORMAT_G723_ADPCM                 = 0x0014,	// Antex Electronics Corporation
+	WAVE_FORMAT_DIGISTD                    = 0x0015,	// DSP Solutions, Inc.
+	WAVE_FORMAT_DIGIFIX                    = 0x0016,	// DSP Solutions, Inc.
+	WAVE_FORMAT_DIALOGIC_OKI_ADPCM         = 0x0017,	// Dialogic Corporation
+	WAVE_FORMAT_MEDIAVISION_ADPCM          = 0x0018,	// Media Vision, Inc.
+	WAVE_FORMAT_CU_CODEC                   = 0x0019,	// Hewlett-Packard Company
+	WAVE_FORMAT_YAMAHA_ADPCM               = 0x0020,	// Yamaha Corporation of America
+	WAVE_FORMAT_SONARC                     = 0x0021,	// Speech Compression
+	WAVE_FORMAT_DSPGROUP_TRUESPEECH        = 0x0022,	// DSP Group, Inc
+	WAVE_FORMAT_ECHOSC1                    = 0x0023,	// Echo Speech Corporation
+	WAVE_FORMAT_AUDIOFILE_AF36             = 0x0024,	// Virtual Music, Inc.
+	WAVE_FORMAT_APTX                       = 0x0025,	// Audio Processing Technology
+	WAVE_FORMAT_AUDIOFILE_AF10             = 0x0026,	// Virtual Music, Inc.
+	WAVE_FORMAT_PROSODY_1612               = 0x0027,	// Aculab plc
+	WAVE_FORMAT_LRC                        = 0x0028,	// Merging Technologies S.A.
+	WAVE_FORMAT_DOLBY_AC2                  = 0x0030,	// Dolby Laboratories
+	WAVE_FORMAT_GSM610                     = 0x0031,	// Microsoft Corporation
+	WAVE_FORMAT_MSNAUDIO                   = 0x0032,	// Microsoft Corporation
+	WAVE_FORMAT_ANTEX_ADPCME               = 0x0033,	// Antex Electronics Corporation
+	WAVE_FORMAT_CONTROL_RES_VQLPC          = 0x0034,	// Control Resources Limited
+	WAVE_FORMAT_DIGIREAL                   = 0x0035,	// DSP Solutions, Inc.
+	WAVE_FORMAT_DIGIADPCM                  = 0x0036,	// DSP Solutions, Inc.
+	WAVE_FORMAT_CONTROL_RES_CR10           = 0x0037,	// Control Resources Limited
+	WAVE_FORMAT_NMS_VBXADPCM               = 0x0038,	// Natural MicroSystems
+	WAVE_FORMAT_CS_IMAADPCM                = 0x0039,	// Crystal Semiconductor IMA ADPCM
+	WAVE_FORMAT_ECHOSC3                    = 0x003A,	// Echo Speech Corporation
+	WAVE_FORMAT_ROCKWELL_ADPCM             = 0x003B,	// Rockwell International
+	WAVE_FORMAT_ROCKWELL_DIGITALK          = 0x003C,	// Rockwell International
+	WAVE_FORMAT_XEBEC                      = 0x003D,	// Xebec Multimedia Solutions Limited
+	WAVE_FORMAT_G721_ADPCM                 = 0x0040,	// Antex Electronics Corporation
+	WAVE_FORMAT_G728_CELP                  = 0x0041,	// Antex Electronics Corporation
+	WAVE_FORMAT_MSG723                     = 0x0042,	// Microsoft Corporation
+	WAVE_FORMAT_MPEG                       = 0x0050,	// Microsoft Corporation
+	WAVE_FORMAT_RT24                       = 0x0052,	// InSoft, Inc.
+	WAVE_FORMAT_PAC                        = 0x0053,	// InSoft, Inc.
+	WAVE_FORMAT_MPEGLAYER3                 = 0x0055,	// ISO/MPEG Layer3 Format Tag
+	WAVE_FORMAT_LUCENT_G723                = 0x0059,	// Lucent Technologies
+	WAVE_FORMAT_CIRRUS                     = 0x0060,	// Cirrus Logic
+	WAVE_FORMAT_ESPCM                      = 0x0061,	// ESS Technology
+	WAVE_FORMAT_VOXWARE                    = 0x0062,	// Voxware Inc
+	WAVE_FORMAT_CANOPUS_ATRAC              = 0x0063,	// Canopus, co., Ltd.
+	WAVE_FORMAT_G726_ADPCM                 = 0x0064,	// APICOM
+	WAVE_FORMAT_G722_ADPCM                 = 0x0065,	// APICOM
+	WAVE_FORMAT_DSAT_DISPLAY               = 0x0067,	// Microsoft Corporation
+	WAVE_FORMAT_VOXWARE_BYTE_ALIGNED       = 0x0069,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_AC8                = 0x0070,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_AC10               = 0x0071,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_AC16               = 0x0072,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_AC20               = 0x0073,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_RT24               = 0x0074,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_RT29               = 0x0075,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_RT29HW             = 0x0076,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_VR12               = 0x0077,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_VR18               = 0x0078,	// Voxware Inc
+	WAVE_FORMAT_VOXWARE_TQ40               = 0x0079,	// Voxware Inc
+	WAVE_FORMAT_SOFTSOUND                  = 0x0080,	// Softsound, Ltd.
+	WAVE_FORMAT_VOXWARE_TQ60               = 0x0081,	// Voxware Inc
+	WAVE_FORMAT_MSRT24                     = 0x0082,	// Microsoft Corporation
+	WAVE_FORMAT_G729A                      = 0x0083,	// AT&T Labs, Inc.
+	WAVE_FORMAT_MVI_MVI2                   = 0x0084,	// Motion Pixels
+	WAVE_FORMAT_DF_G726                    = 0x0085,	// DataFusion Systems (Pty) (Ltd)
+	WAVE_FORMAT_DF_GSM610                  = 0x0086,	// DataFusion Systems (Pty) (Ltd)
+	WAVE_FORMAT_ISIAUDIO                   = 0x0088,	// Iterated Systems, Inc.
+	WAVE_FORMAT_ONLIVE                     = 0x0089,	// OnLive! Technologies, Inc.
+	WAVE_FORMAT_SBC24                      = 0x0091,	// Siemens Business Communications Sys
+	WAVE_FORMAT_DOLBY_AC3_SPDIF            = 0x0092,	// Sonic Foundry
+	WAVE_FORMAT_MEDIASONIC_G723            = 0x0093,	// MediaSonic
+	WAVE_FORMAT_PROSODY_8KBPS              = 0x0094,	// Aculab plc
+	WAVE_FORMAT_ZYXEL_ADPCM                = 0x0097,	// ZyXEL Communications, Inc.
+	WAVE_FORMAT_PHILIPS_LPCBB              = 0x0098,	// Philips Speech Processing
+	WAVE_FORMAT_PACKED                     = 0x0099,	// Studer Professional Audio AG
+	WAVE_FORMAT_MALDEN_PHONYTALK           = 0x00A0,	// Malden Electronics Ltd.
+	WAVE_FORMAT_RHETOREX_ADPCM             = 0x0100,	// Rhetorex Inc.
+	WAVE_FORMAT_IRAT                       = 0x0101,	// BeCubed Software Inc.
+	WAVE_FORMAT_VIVO_G723                  = 0x0111,	// Vivo Software
+	WAVE_FORMAT_VIVO_SIREN                 = 0x0112,	// Vivo Software
+	WAVE_FORMAT_DIGITAL_G723               = 0x0123,	// Digital Equipment Corporation
+	WAVE_FORMAT_SANYO_LD_ADPCM             = 0x0125,	// Sanyo Electric Co., Ltd.
+	WAVE_FORMAT_SIPROLAB_ACEPLNET          = 0x0130,	// Sipro Lab Telecom Inc.
+	WAVE_FORMAT_SIPROLAB_ACELP4800         = 0x0131,	// Sipro Lab Telecom Inc.
+	WAVE_FORMAT_SIPROLAB_ACELP8V3          = 0x0132,	// Sipro Lab Telecom Inc.
+	WAVE_FORMAT_SIPROLAB_G729              = 0x0133,	// Sipro Lab Telecom Inc.
+	WAVE_FORMAT_SIPROLAB_G729A             = 0x0134,	// Sipro Lab Telecom Inc.
+	WAVE_FORMAT_SIPROLAB_KELVIN            = 0x0135,	// Sipro Lab Telecom Inc.
+	WAVE_FORMAT_G726ADPCM                  = 0x0140,	// Dictaphone Corporation
+	WAVE_FORMAT_QUALCOMM_PUREVOICE         = 0x0150,	// Qualcomm, Inc.
+	WAVE_FORMAT_QUALCOMM_HALFRATE          = 0x0151,	// Qualcomm, Inc.
+	WAVE_FORMAT_TUBGSM                     = 0x0155,	// Ring Zero Systems, Inc.
+	WAVE_FORMAT_MSAUDIO1                   = 0x0160,	// Microsoft Corporation
+	WAVE_FORMAT_CREATIVE_ADPCM             = 0x0200,	// Creative Labs, Inc
+	WAVE_FORMAT_CREATIVE_FASTSPEECH8       = 0x0202,	// Creative Labs, Inc
+	WAVE_FORMAT_CREATIVE_FASTSPEECH10      = 0x0203,	// Creative Labs, Inc
+	WAVE_FORMAT_UHER_ADPCM                 = 0x0210,	// UHER informatic GmbH
+	WAVE_FORMAT_QUARTERDECK                = 0x0220,	// Quarterdeck Corporation
+	WAVE_FORMAT_ILINK_VC                   = 0x0230,	// I-link Worldwide
+	WAVE_FORMAT_RAW_SPORT                  = 0x0240,	// Aureal Semiconductor
+	WAVE_FORMAT_IPI_HSX                    = 0x0250,	// Interactive Products, Inc.
+	WAVE_FORMAT_IPI_RPELP                  = 0x0251,	// Interactive Products, Inc.
+	WAVE_FORMAT_CS2                        = 0x0260,	// Consistent Software
+	WAVE_FORMAT_SONY_SCX                   = 0x0270,	// Sony Corp.
+	WAVE_FORMAT_FM_TOWNS_SND               = 0x0300,	// Fujitsu Corp.
+	WAVE_FORMAT_BTV_DIGITAL                = 0x0400,	// Brooktree Corporation
+	WAVE_FORMAT_QDESIGN_MUSIC              = 0x0450,	// QDesign Corporation
+	WAVE_FORMAT_VME_VMPCM                  = 0x0680,	// AT&T Labs, Inc.
+	WAVE_FORMAT_TPC                        = 0x0681,	// AT&T Labs, Inc.
+	WAVE_FORMAT_OLIGSM                     = 0x1000,	// Ing C. Olivetti & C., S.p.A.
+	WAVE_FORMAT_OLIADPCM                   = 0x1001,	// Ing C. Olivetti & C., S.p.A.
+	WAVE_FORMAT_OLICELP                    = 0x1002,	// Ing C. Olivetti & C., S.p.A.
+	WAVE_FORMAT_OLISBC                     = 0x1003,	// Ing C. Olivetti & C., S.p.A.
+	WAVE_FORMAT_OLIOPR                     = 0x1004,	// Ing C. Olivetti & C., S.p.A.
+	WAVE_FORMAT_LH_CODEC                   = 0x1100,	// Lernout & Hauspie
+	WAVE_FORMAT_NORRIS                     = 0x1400,	// Norris Communications, Inc.
+	WAVE_FORMAT_SOUNDSPACE_MUSICOMPRESS    = 0x1500,	// AT&T Labs, Inc.
+	WAVE_FORMAT_DVM                        = 0x2000,	// FAST Multimedia AG
+};
+
+int sfxr_ExportWAV_F(sfxr_Settings const* settings, int wav_bits, int sample_rate,  const char* filename_format, ...)
+{
+	if(wav_bits < 0)	wav_bits = 32;
+	if(sample_rate < 0)  sample_rate = 44100;
+
+	if(wav_bits != 8 && wav_bits != 16 && wav_bits != 32)
+		return -1;
+	if(sample_rate > 44100)
+		return -1;
+
+	if(settings == NULL) return -1;
+
+	va_list vlist;
+	va_start(vlist, filename_format);
+	char filename[FILENAME_MAX];
+	int result = vsnprintf(filename, sizeof(filename), filename_format, vlist);
+
+	if(result < 0)
+		return result;
+	va_end(vlist);
+
+	return sfxr_ExportWAV_F(settings, wav_bits, sample_rate, filename);
+}
+
+int sfxr_ExportWAV(sfxr_Settings const* s, int wav_bits, int sample_rate, const char* filename)
+{
+	if(wav_bits < 0)	wav_bits = 32;
+	if(sample_rate < 0)  sample_rate = 44100;
+
+	if(wav_bits != 8 && wav_bits != 16 && wav_bits != 32)
+		return -1;
+	if(sample_rate > 44100)
+		return -1;
 
 	if(s == NULL) return -1;
-
-	int file_sampleswritten = 0;
-	float filesample= 0.0f;
-	int fileacc= 0;
 
 	FILE* foutput= fopen(filename, "wb");
 	if(!foutput)
 		return -1;
+
 	// write wav header
-	unsigned int dword= 0;
-	unsigned short word= 0;
-	fwrite("RIFF", 4, 1, foutput); // "RIFF"
-	dword= 0;
-	fwrite(&dword, 1, 4, foutput); // remaining file size
-	fwrite("WAVE", 4, 1, foutput); // "WAVE"
 
-	fwrite("fmt ", 4, 1, foutput); // "fmt "
-	dword= 16;
-	fwrite(&dword, 1, 4, foutput); // chunk size
-	word= 1;
-	fwrite(&word, 1, 2, foutput); // compression code
-	word= 1;
-	fwrite(&word, 1, 2, foutput); // channels
-	dword= wav_freq;
-	fwrite(&dword, 1, 4, foutput); // sample rate
-	dword= wav_freq*wav_bits/8;
-	fwrite(&dword, 1, 4, foutput); // bytes/sec
-	word= wav_bits/8;
-	fwrite(&word, 1, 2, foutput); // block align
-	word= wav_bits;
-	fwrite(&word, 1, 2, foutput); // bits per sample
+	struct sfxr_WavHeader header = {
+		.RIFF = {'R', 'I', 'F', 'F'},
+		.fileSize = 0,
+		.WAVE = {'W', 'A', 'V', 'E'},
+		.fmt_ = {'f', 'm', 't', ' '},
 
-	fwrite("data", 4, 1, foutput); // "data"
-	dword= 0;
-	int foutstream_datasize= ftell(foutput);
-	fwrite(&dword, 1, 4, foutput); // chunk size
+		.chunkSize0 = 16,
+		.compressionCode = WAVE_FORMAT_UNCOMPRESSED,
+		.channels = 1,
+		.sampleRate = sample_rate,
+		.bytesSec = sample_rate*wav_bits/8,
+		.blockAlign = wav_bits/8,
+		.bitsPerSample = wav_bits,
+
+		.data = {'d', 'a', 't', 'a'},
+		.chunkSize1 = 0
+	};
+
+	fwrite(&header, sizeof(header), 1, foutput);
 
 	// write sample data
 	sfxr_Model model;
@@ -394,49 +607,55 @@ int sfxr_ExportWAV(sfxr_Settings const* s, const char* filename)
 	sfxr_ModelInit(&model, s);
 	sfxr_DataInit(&data, &model);
 
-	float buffer[256];
-	while(data.playing_sample)
+	int no_samples = sfxr_ComputeNoSamples(&data);
+// padd a bit cause some audio players will cut off it samples is too short
+	no_samples = (no_samples + 255) & 0xFFFFFFF0;
+	float * buffer = malloc(no_samples * sizeof(float));
+
+	int samples = sfxr_DataSynthSample(&data, no_samples, buffer, nullptr);
+// clear out tail.
+	memset(&buffer[samples], 0, (no_samples-samples)*sizeof(float));
+	samples = no_samples;
+
+// gain
+//	for(int i = 0; i < samples; ++i)
+//	{
+//		buffer[i] *= 4.0f;
+//		if(buffer[i] > 1.0f) buffer[i]= 1.0f;
+//		if(buffer[i] < -1.0f) buffer[i]= -1.0f;
+//	}
+
+
+// supersample
+	samples = sfxr_Downsample(buffer, samples, buffer, samples, sample_rate, 44100);
+
+// export
+	if(wav_bits == 32)
 	{
-		sfxr_DataSynthSample(&data, 256, buffer);
-
-		for(int i = 0; i < 256; ++i)
-		{
-			float ssample = buffer[i];
-
-			// quantize depending on format
-			// accumulate/count to accomodate variable sample rate?
-			ssample*= 4.0f; // arbitrary gain to get reasonable output volume...
-			if(ssample>1.0f) ssample= 1.0f;
-			if(ssample<-1.0f) ssample= -1.0f;
-			filesample+= ssample;
-			fileacc++;
-			if(wav_freq== 44100 || fileacc== 2)
-			{
-				filesample/= fileacc;
-				fileacc= 0;
-				if(wav_bits== 16)
-				{
-					short isample= (short)(filesample*32000);
-					fwrite(&isample, 1, 2, foutput);
-				}
-				else
-				{
-					unsigned char isample= (unsigned char)(filesample*127+128);
-					fwrite(&isample, 1, 1, foutput);
-				}
-				filesample= 0.0f;
-			}
-			file_sampleswritten++;
-		}
+		fwrite(buffer, samples, 4, foutput);
 	}
+	else if(wav_bits == 16)
+	{
+		sfxr_Quantize16((uint16_t*)buffer, buffer, samples);
+		fwrite(buffer, samples, 2, foutput);
+	}
+	else if(wav_bits == 8)
+	{
+		sfxr_Quantize8((uint8_t*)buffer, buffer, samples);
+		fwrite(buffer, samples, 1, foutput);
+	}
+
+	free(buffer);
+
+	unsigned int foutstream_datasize = sizeof(header)-4;
 
 	// seek back to header and write size info
 	fseek(foutput, 4, SEEK_SET);
-	dword= 0;
-	dword= foutstream_datasize-4+file_sampleswritten*wav_bits/8;
+	unsigned int dword= 0;
+	dword= foutstream_datasize-4+samples*wav_bits/8;
 	fwrite(&dword, 1, 4, foutput); // remaining file size
 	fseek(foutput, foutstream_datasize, SEEK_SET);
-	dword= file_sampleswritten*wav_bits/8;
+	dword= samples*wav_bits/8;
 	fwrite(&dword, 1, 4, foutput); // chunk size (data)
 	fclose(foutput);
 
@@ -444,6 +663,66 @@ int sfxr_ExportWAV(sfxr_Settings const* s, const char* filename)
 }
 
 #endif
+
+int sfxr_Downsample(float * dst, int dst_length, float* src, int src_length, int dst_sample_rate, int src_sample_rate)
+{
+	if(dst == 0 || src == 0) return -1;
+
+	if(dst_sample_rate == src_sample_rate)
+	{
+		if(src == dst) return 0;
+		int cpy = dst_length < src_length? dst_length : src_length;
+		memcpy(dst, src, cpy*sizeof(float));
+		return cpy;
+	}
+
+	float ratio =  src_sample_rate / (float)dst_sample_rate;
+	float counter = -ratio;
+	float accumulator = 0.f;
+	int   denominator = 0;
+
+	int write = 0;
+	for(int read = 0; read < src_length && write < dst_length; ++read)
+	{
+		accumulator += src[read];
+		denominator += 1;
+
+		if((counter += 1) > ratio)
+		{
+			dst[write++] = accumulator / denominator;
+
+			counter    -= ratio;
+			denominator = 0;
+			accumulator = 0;
+		}
+	}
+
+// clear out tail
+	int padded = (write + 255) & 0xFFFFFFF0;
+
+	memset(&dst[write], 0, (padded-write)*sizeof(float));
+	return padded;
+}
+
+int sfxr_Quantize8(unsigned char * dst, float* src, int length)
+{
+	if(dst == 0 || src == 0) return -1;
+
+	for(int i = 0; i < length; ++i)
+		dst[i] = src[i] *127 + 128;
+
+	return length;
+}
+
+int sfxr_Quantize16(unsigned short * dst, float* src, int length)
+{
+	if(dst == 0 || src == 0) return -1;
+
+	for(int i = 0; i < length; ++i)
+		dst[i] = src[i] * 32000;
+
+	return length;
+}
 
 int sfxr_InitInternal(sfxr_Settings * dst)
 {
@@ -478,29 +757,37 @@ int sfxr_Mutate(sfxr_Settings * s, sfxr_Settings const* src)
 
 	sfxr_ReadableToInternal(s, s);
 
-	if(rnd(1)) s->frequency.baseHz+= frnd(0.1f)-0.05f;
-//		if(rnd(1)) s->frequency.limit+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->frequency.slideOctaves_s+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->frequency.slideOctaves_s2+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->duty.cyclePercent+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->duty.sweepPercent_sec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->vibrato.strengthPercent+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->vibrato.speedHz+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->vibrato.delaySec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->envelope.attackSec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->envelope.sustainSec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->envelope.decaySec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->envelope.punchPercent+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->lowPassFilter.resonancePercent+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->lowPassFilter.cutoffFrequencyHz+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->highPassFilter.cuttofSweep_sec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->highPassFilter.cutoffFrequencyHz+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->highPassFilter.cuttofSweep_sec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->flanger.offsetMs_sec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->flanger.sweepMs_sec2+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->retrigger.rateHz+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->arpeggiation.speedSec+= frnd(0.1f)-0.05f;
-	if(rnd(1)) s->arpeggiation.frequencySemitones+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->frequency.baseHz					+= frnd(0.1f)-0.05f;
+//	if(rnd(1)) s->frequency.limitHz					+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->frequency.slideOctaves_s			+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->frequency.slideOctaves_s2			+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->duty.cyclePercent					+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->duty.sweepPercent_sec				+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->vibrato.strengthPercent			+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->vibrato.speedHz					+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->vibrato.delaySec					+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->envelope.attackSec				+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->envelope.sustainSec				+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->envelope.decaySec					+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->envelope.punchPercent				+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->lowPassFilter.resonancePercent	+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->lowPassFilter.cutoffFrequencyHz	+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->lowPassFilter.cuttofSweep_sec		+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->highPassFilter.cutoffFrequencyHz	+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->highPassFilter.cuttofSweep_sec	+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->flanger.offsetMs_sec				+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->flanger.sweepMs_sec2				+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->retrigger.rateHz					+= frnd(0.1f)-0.05f;
+
+	if(rnd(1)) s->arpeggiation.speedSec				+= frnd(0.1f)-0.05f;
+	if(rnd(1)) s->arpeggiation.frequencySemitones	+= frnd(0.1f)-0.05f;
 
 	sfxr_InternalToReadable(s, s);
 
@@ -512,14 +799,16 @@ int sfxr_Coin(sfxr_Settings * s)
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->frequency.baseHz				= 0.4f+frnd(0.5f);
-	s->envelope.attackSec				= 0.0f;
-	s->envelope.sustainSec				= frnd(0.1f);
-	s->envelope.decaySec				= 0.1f+frnd(0.4f);
+	s->frequency.baseHz						= 0.4f+frnd(0.5f);
+
+	s->envelope.attackSec					= 0.0f;
+	s->envelope.sustainSec					= frnd(0.1f);
+	s->envelope.decaySec					= 0.1f+frnd(0.4f);
 	s->envelope.punchPercent				= 0.3f+frnd(0.3f);
+
 	if(rnd(1))
 	{
-		s->arpeggiation.speedSec		= 0.5f+frnd(0.2f);
+		s->arpeggiation.speedSec			= 0.5f+frnd(0.2f);
 		s->arpeggiation.frequencySemitones	= 0.2f+frnd(0.4f);
 	}
 
@@ -532,37 +821,45 @@ int sfxr_Laser(sfxr_Settings * s) {
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->wave_type				=  rnd(2);
-	if (s->wave_type 	 ==  2 && rnd(1))
-		s->wave_type 		=  rnd(1);
-	s->frequency.baseHz 		=  0.5f + frnd(0.5f);
-	s->frequency.limitHz 		=  s->frequency.baseHz - 0.2f - frnd(0.6f);
+	s->wave_type							=  rnd(2);
+	if (s->wave_type  ==  2 && rnd(1))
+		s->wave_type						=  rnd(1);
+
+	s->envelope.attackSec					=  0.0f;
+	s->envelope.sustainSec					=  0.1f + frnd(0.2f);
+	s->envelope.decaySec					=  frnd(0.4f);
+	if (rnd(1))
+		s->envelope.punchPercent			=  frnd(0.3f);
+
+	s->frequency.baseHz						=  0.5f + frnd(0.5f);
+	s->frequency.limitHz					=  s->frequency.baseHz - 0.2f - frnd(0.6f);
 	if (s->frequency.limitHz < 0.2f)
-		s->frequency.limitHz 		=  0.2f;
-	s->frequency.slideOctaves_s 		=  -0.15f - frnd(0.2f);
-	if (rnd(2) 	 ==  0) {
-		s->frequency.baseHz 		=  0.3f + frnd(0.6f);
-		s->frequency.limitHz 		=  frnd(0.1f);
+		s->frequency.limitHz				=  0.2f;
+	s->frequency.slideOctaves_s				=  -0.15f - frnd(0.2f);
+	if (rnd(2) 	 ==  0)
+	{
+		s->frequency.baseHz					=  0.3f + frnd(0.6f);
+		s->frequency.limitHz				=  frnd(0.1f);
 		s->frequency.slideOctaves_s 		=  -0.35f - frnd(0.3f);
 	}
-	if (rnd(1)) {
-		s->duty.cyclePercent 		=  frnd(0.5f);
-		s->duty.sweepPercent_sec 		=  frnd(0.2f);
-	} else {
-		s->duty.cyclePercent 		=  0.4f + frnd(0.5f);
-		s->duty.sweepPercent_sec 		=  -frnd(0.7f);
-	}
-	s->envelope.attackSec 		=  0.0f;
-	s->envelope.sustainSec 		=  0.1f + frnd(0.2f);
-	s->envelope.decaySec 		=  frnd(0.4f);
+
 	if (rnd(1))
-		s->envelope.punchPercent 		=  frnd(0.3f);
-	if (rnd(2) 	 ==  0) {
-		s->flanger.offsetMs_sec 		=  frnd(0.2f);
-		s->flanger.sweepMs_sec2 		=  -frnd(0.2f);
+	{
+		s->duty.cyclePercent				=  frnd(0.5f);
+		s->duty.sweepPercent_sec			=  frnd(0.2f);
+	} else
+	{
+		s->duty.cyclePercent				=  0.4f + frnd(0.5f);
+		s->duty.sweepPercent_sec			=  -frnd(0.7f);
+	}
+
+	if (rnd(2) 	 ==  0)
+	{
+		s->flanger.offsetMs_sec				=  frnd(0.2f);
+		s->flanger.sweepMs_sec2				=  -frnd(0.2f);
 	}
 	if (rnd(1))
-		s->highPassFilter.cutoffFrequencyHz 		=  frnd(0.3f);
+		s->highPassFilter.cutoffFrequencyHz =  frnd(0.3f);
 
 	sfxr_InternalToReadable(s, s);
 
@@ -573,34 +870,40 @@ int sfxr_Explosion(sfxr_Settings * s) {
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->wave_type 		=  3;
-	if (rnd(1)) {
-		s->frequency.baseHz 		=  0.1f + frnd(0.4f);
+	s->wave_type							=  3;
+	if (rnd(1))
+	{
+		s->frequency.baseHz					=  0.1f + frnd(0.4f);
 		s->frequency.slideOctaves_s 		=  -0.1f + frnd(0.4f);
 	} else {
-		s->frequency.baseHz 		=  0.2f + frnd(0.7f);
+		s->frequency.baseHz					=  0.2f + frnd(0.7f);
 		s->frequency.slideOctaves_s 		=  -0.2f - frnd(0.2f);
 	}
-	s->frequency.baseHz *=  s->frequency.baseHz;
+	s->frequency.baseHz					   *=  s->frequency.baseHz;
 	if (rnd(4) 	 ==  0)
 		s->frequency.slideOctaves_s 		=  0.0f;
 	if (rnd(2) 	 ==  0)
-		s->retrigger.rateHz 		=  0.3f + frnd(0.5f);
-	s->envelope.attackSec 		=  0.0f;
-	s->envelope.sustainSec 		=  0.1f + frnd(0.3f);
-	s->envelope.decaySec 		=  frnd(0.5f);
-	if (rnd(1) 	 ==  0) {
-		s->flanger.offsetMs_sec 		=  -0.3f + frnd(0.9f);
-		s->flanger.sweepMs_sec2 		=  -frnd(0.3f);
+		s->retrigger.rateHz					=  0.3f + frnd(0.5f);
+
+	s->envelope.attackSec					=  0.0f;
+	s->envelope.sustainSec					=  0.1f + frnd(0.3f);
+	s->envelope.decaySec					=  frnd(0.5f);
+
+	if (rnd(1) 	 ==  0)
+	{
+		s->flanger.offsetMs_sec				=  -0.3f + frnd(0.9f);
+		s->flanger.sweepMs_sec2				=  -frnd(0.3f);
 	}
-	s->envelope.punchPercent 		=  0.2f + frnd(0.6f);
-	if (rnd(1)) {
-		s->vibrato.strengthPercent 		=  frnd(0.7f);
-		s->vibrato.speedHz 		=  frnd(0.6f);
+	s->envelope.punchPercent				=  0.2f + frnd(0.6f);
+	if (rnd(1))
+	{
+		s->vibrato.strengthPercent			=  frnd(0.7f);
+		s->vibrato.speedHz					=  frnd(0.6f);
 	}
-	if (rnd(2) 	 ==  0) {
-		s->arpeggiation.speedSec 		=  0.6f + frnd(0.3f);
-		s->arpeggiation.frequencySemitones 		=  0.8f - frnd(1.6f);
+	if (rnd(2) 	 ==  0)
+	{
+		s->arpeggiation.speedSec			=  0.6f + frnd(0.3f);
+		s->arpeggiation.frequencySemitones	=  0.8f - frnd(1.6f);
 	}
 
 	sfxr_InternalToReadable(s, s);
@@ -613,24 +916,28 @@ int sfxr_Powerup(sfxr_Settings* s) {
 	sfxr_InitInternal(s);
 
 	if (rnd(1))
-		s->wave_type 		=  1;
+		s->wave_type					=  1;
 	else
-		s->duty.cyclePercent 		=  frnd(0.6f);
-	if (rnd(1)) {
-		s->frequency.baseHz 		=  0.2f + frnd(0.3f);
-		s->frequency.slideOctaves_s 		=  0.1f + frnd(0.4f);
-		s->retrigger.rateHz 		=  0.4f + frnd(0.4f);
-	} else {
-		s->frequency.baseHz 		=  0.2f + frnd(0.3f);
-		s->frequency.slideOctaves_s 		=  0.05f + frnd(0.2f);
-		if (rnd(1)) {
-			s->vibrato.strengthPercent 		=  frnd(0.7f);
-			s->vibrato.speedHz 		=  frnd(0.6f);
+		s->duty.cyclePercent			=  frnd(0.6f);
+	if (rnd(1))
+	{
+		s->frequency.baseHz				=  0.2f + frnd(0.3f);
+		s->frequency.slideOctaves_s 	=  0.1f + frnd(0.4f);
+		s->retrigger.rateHz				=  0.4f + frnd(0.4f);
+	}
+	else
+	{
+		s->frequency.baseHz				=  0.2f + frnd(0.3f);
+		s->frequency.slideOctaves_s 	=  0.05f + frnd(0.2f);
+		if (rnd(1))
+		{
+			s->vibrato.strengthPercent 	=  frnd(0.7f);
+			s->vibrato.speedHz			=  frnd(0.6f);
 		}
 	}
-	s->envelope.attackSec 		=  0.0f;
-	s->envelope.sustainSec 		=  frnd(0.4f);
-	s->envelope.decaySec 		=  0.1f + frnd(0.4f);
+	s->envelope.attackSec				=  0.0f;
+	s->envelope.sustainSec				=  frnd(0.4f);
+	s->envelope.decaySec				=  0.1f + frnd(0.4f);
 
 	sfxr_InternalToReadable(s, s);
 
@@ -641,18 +948,22 @@ int sfxr_Hit(sfxr_Settings* s) {
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->wave_type 		=  rnd(2);
-	if (s->wave_type 	 ==  2)
-		s->wave_type 		=  3;
-	if (s->wave_type 	 ==  0)
-		s->duty.cyclePercent 		=  frnd(0.6f);
-	s->frequency.baseHz 		=  0.2f + frnd(0.6f);
-	s->frequency.slideOctaves_s 		=  -0.3f - frnd(0.4f);
-	s->envelope.attackSec 		=  0.0f;
-	s->envelope.sustainSec 		=  frnd(0.1f);
-	s->envelope.decaySec 		=  0.1f + frnd(0.2f);
+	switch((s->wave_type =  rnd(2)))
+	{
+	case sfxr_Square:	s->duty.cyclePercent =  frnd(0.6f);	break;
+	case sfxr_Sine:		s->wave_type		 =  3; break;
+	default: break;
+	}
+
+	s->frequency.baseHz						=  0.2f + frnd(0.6f);
+	s->frequency.slideOctaves_s				=  -0.3f - frnd(0.4f);
+
+	s->envelope.attackSec					=  0.0f;
+	s->envelope.sustainSec					=  frnd(0.1f);
+	s->envelope.decaySec					=  0.1f + frnd(0.2f);
+
 	if (rnd(1))
-		s->highPassFilter.cutoffFrequencyHz 		=  frnd(0.3f);
+		s->highPassFilter.cutoffFrequencyHz =  frnd(0.3f);
 
 	sfxr_InternalToReadable(s, s);
 
@@ -663,17 +974,21 @@ int sfxr_Jump(sfxr_Settings* s) {
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->wave_type 		=  0;
+	s->wave_type				=  0;
 	s->duty.cyclePercent 		=  frnd(0.6f);
+
 	s->frequency.baseHz 		=  0.3f + frnd(0.3f);
-	s->frequency.slideOctaves_s 		=  0.1f + frnd(0.2f);
+	s->frequency.slideOctaves_s =  0.1f + frnd(0.2f);
+
 	s->envelope.attackSec 		=  0.0f;
 	s->envelope.sustainSec 		=  0.1f + frnd(0.3f);
 	s->envelope.decaySec 		=  0.1f + frnd(0.2f);
+
 	if (rnd(1))
-		s->highPassFilter.cutoffFrequencyHz 		=  frnd(0.3f);
+		s->highPassFilter.cutoffFrequencyHz =  frnd(0.3f);
+
 	if (rnd(1))
-		s->lowPassFilter.cutoffFrequencyHz 		=  1.0f - frnd(0.6f);
+		s->lowPassFilter.cutoffFrequencyHz  =  1.0f - frnd(0.6f);
 
 	sfxr_InternalToReadable(s, s);
 
@@ -684,14 +999,16 @@ int sfxr_Blip(sfxr_Settings* s) {
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->wave_type 		=  rnd(1);
-	if (s->wave_type 	 ==  0)
-		s->duty.cyclePercent 		=  frnd(0.6f);
-	s->frequency.baseHz 		=  0.2f + frnd(0.4f);
-	s->envelope.attackSec 		=  0.0f;
-	s->envelope.sustainSec 		=  0.1f + frnd(0.1f);
-	s->envelope.decaySec 		=  frnd(0.2f);
-	s->highPassFilter.cutoffFrequencyHz 		=  0.1f;
+	if ((s->wave_type =  rnd(1)) ==  0)
+		s->duty.cyclePercent =  frnd(0.6f);
+
+	s->frequency.baseHz 	 =  0.2f + frnd(0.4f);
+
+	s->envelope.attackSec 	=  0.0f;
+	s->envelope.sustainSec 	=  0.1f + frnd(0.1f);
+	s->envelope.decaySec	=  frnd(0.2f);
+
+	s->highPassFilter.cutoffFrequencyHz =  0.1f;
 
 	sfxr_InternalToReadable(s, s);
 
@@ -703,51 +1020,58 @@ int sfxr_Randomize(sfxr_Settings * s)
 	if(s == NULL) return -1;
 	sfxr_InitInternal(s);
 
-	s->frequency.baseHz		= pow(frnd(2.0f)-1.0f, 2.0f);
+	s->envelope.attackSec				= pow(frnd(2.0f)-1.0f, 3.0f);
+	s->envelope.sustainSec				= pow(frnd(2.0f)-1.0f, 2.0f);
+	s->envelope.decaySec				= frnd(2.0f)-1.0f;
+	s->envelope.punchPercent			= pow(frnd(0.8f), 2.0f);
+
+	if(s->envelope.attackSec+s->envelope.sustainSec+s->envelope.decaySec<0.2f)
+	{
+		s->envelope.sustainSec			+= 0.2f+frnd(0.3f);
+		s->envelope.decaySec			+= 0.2f+frnd(0.3f);
+	}
+
+	s->frequency.baseHz					= pow(frnd(2.0f)-1.0f, 2.0f);
 
 	if(rnd(1))
-		s->frequency.baseHz	= pow(frnd(2.0f)-1.0f, 3.0f)+0.5f;
+		s->frequency.baseHz				= pow(frnd(2.0f)-1.0f, 3.0f)+0.5f;
 
-	s->frequency.limitHz		= 0.0f;
-	s->frequency.slideOctaves_s		= pow(frnd(2.0f)-1.0f, 5.0f);
+	s->frequency.limitHz				= 0.0f;
+	s->frequency.slideOctaves_s			= pow(frnd(2.0f)-1.0f, 5.0f);
 
 	if(s->frequency.baseHz>0.7f && s->frequency.slideOctaves_s>0.2f)
 		s->frequency.slideOctaves_s		= -s->frequency.slideOctaves_s;
 
 	if(s->frequency.baseHz<0.2f && s->frequency.slideOctaves_s<-0.05f)
-		s->frequency.slideOctaves_s	= -s->frequency.slideOctaves_s;
+		s->frequency.slideOctaves_s		= -s->frequency.slideOctaves_s;
 
-	s->frequency.slideOctaves_s2	= pow(frnd(2.0f)-1.0f, 3.0f);
-	s->duty.cyclePercent			= frnd(2.0f)-1.0f;
+	s->frequency.slideOctaves_s2		= pow(frnd(2.0f)-1.0f, 3.0f);
+
+	s->duty.cyclePercent				= frnd(2.0f)-1.0f;
 	s->duty.sweepPercent_sec			= pow(frnd(2.0f)-1.0f, 3.0f);
-	s->vibrato.strengthPercent		= pow(frnd(2.0f)-1.0f, 3.0f);
-	s->vibrato.speedHz			= frnd(2.0f)-1.0f;
-	s->vibrato.delaySec			= frnd(2.0f)-1.0f;
-	s->envelope.attackSec		= pow(frnd(2.0f)-1.0f, 3.0f);
-	s->envelope.sustainSec		= pow(frnd(2.0f)-1.0f, 2.0f);
-	s->envelope.decaySec		= frnd(2.0f)-1.0f;
-	s->envelope.punchPercent		= pow(frnd(0.8f), 2.0f);
 
-	if(s->envelope.attackSec+s->envelope.sustainSec+s->envelope.decaySec<0.2f)
-	{
-		s->envelope.sustainSec	+= 0.2f+frnd(0.3f);
-		s->envelope.decaySec	+= 0.2f+frnd(0.3f);
-	}
+	s->vibrato.strengthPercent			= pow(frnd(2.0f)-1.0f, 3.0f);
+	s->vibrato.speedHz					= frnd(2.0f)-1.0f;
+	s->vibrato.delaySec					= frnd(2.0f)-1.0f;
+
+	s->flanger.offsetMs_sec				= pow(frnd(2.0f)-1.0f, 3.0f);
+	s->flanger.sweepMs_sec2				= pow(frnd(2.0f)-1.0f, 3.0f);
+
+	s->retrigger.rateHz					= frnd(2.0f)-1.0f;
+
+	s->arpeggiation.speedSec			= frnd(2.0f)-1.0f;
+	s->arpeggiation.frequencySemitones	= frnd(2.0f)-1.0f;
+
 
 	s->lowPassFilter.resonancePercent	= frnd(2.0f)-1.0f;
 	s->lowPassFilter.cutoffFrequencyHz	= 1.0f-pow(frnd(1.0f), 3.0f);
-	s->highPassFilter.cuttofSweep_sec		= pow(frnd(2.0f)-1.0f, 3.0f);
+	s->lowPassFilter.cuttofSweep_sec		= pow(frnd(2.0f)-1.0f, 3.0f);
+
+	s->highPassFilter.cutoffFrequencyHz	= pow(frnd(1.0f), 5.0f);
+	s->highPassFilter.cuttofSweep_sec	= pow(frnd(2.0f)-1.0f, 5.0f);
 
 	if(s->lowPassFilter.cutoffFrequencyHz<0.1f && s->highPassFilter.cuttofSweep_sec<-0.05f)
 		s->highPassFilter.cuttofSweep_sec	= -s->highPassFilter.cuttofSweep_sec;
-
-	s->highPassFilter.cutoffFrequencyHz	= pow(frnd(1.0f), 5.0f);
-	s->highPassFilter.cuttofSweep_sec		= pow(frnd(2.0f)-1.0f, 5.0f);
-	s->flanger.offsetMs_sec			= pow(frnd(2.0f)-1.0f, 3.0f);
-	s->flanger.sweepMs_sec2				= pow(frnd(2.0f)-1.0f, 3.0f);
-	s->retrigger.rateHz			= frnd(2.0f)-1.0f;
-	s->arpeggiation.speedSec		= frnd(2.0f)-1.0f;
-	s->arpeggiation.frequencySemitones	= frnd(2.0f)-1.0f;
 
 	sfxr_InternalToReadable(s, s);
 
@@ -786,9 +1110,6 @@ void sfxr_UnitTestTranslationFunctions()
 		sfxr_InternalToReadable(&c, &b);
 		sfxr_ReadableToInternal(&a, &c);
 		sfxr_Delta(&c, &a, &b);
-
-		int break_point = 0;
-		++break_point;
 	}
 }
 
