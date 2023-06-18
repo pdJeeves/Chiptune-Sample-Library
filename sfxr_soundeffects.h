@@ -20,31 +20,8 @@ const char * StringFromMidiKey(int key);
 void UnitTestMidiHelpers();
 
 typedef struct sfxr_Settings sfxr_Settings;
-
 typedef struct sfxr_Model sfxr_Model;
 typedef struct sfxr_Data sfxr_Data;
-
-int sfxr_ModelInit(sfxr_Model * model, sfxr_Settings const* settings);
-int sfxr_DataInit(sfxr_Data * data, sfxr_Model const* model);
-
-// the library this is forked from always uses a sample rate of 44100
-// ergo divide by 44100 to get time in seconds.
-int sfxr_ComputeRemainingSamples(sfxr_Data const* data);
-
-// use one of buffer or short buffer to get samples out
-// 12 bits per sample is the limit of human hearing, but for mixing/editing etc you want full 32 bit floating samples.
-// for those purposes you should also use 192khz though; but this library can't do more than 44.1khz (the limit of human hearing is 40khz)
-int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, unsigned short * short_buffer);
-int sfxr_SettingsToJson(FILE *, sfxr_Settings * data);
-
-//crush down to desired bit rate (creates PCM wave audio, so the uint8 isn't 2's compliment)
-int sfxr_Quantize8(unsigned char * dst, float* src, int length);
-int sfxr_Quantize16(unsigned short * dst, float* src, int length);
-
-// returns samples written
-int sfxr_Downsample(float * dst, int dst_length, float* src, int src_length, int dst_sample_rate, int src_sample_rate);
-
-int sfxr_Init(sfxr_Settings * dst);
 
 #if INCLUDE_SAMPLES
 	int sfxr_Mutate(sfxr_Settings * dst, sfxr_Settings const* src);
@@ -70,6 +47,28 @@ int sfxr_Init(sfxr_Settings * dst);
 	int sfxr_ExportWAV_F(sfxr_Settings const*, int wav_bits, int sample_rate, const char* filename_format, ...);
 #endif
 
+// crush down to desired bit rate (creates PCM wave audio, so the uint8 isn't 2's compliment)
+// assumes dst is big enough
+int sfxr_Quantize8(unsigned char * dst, float* src, int src_length);
+int sfxr_Quantize16(unsigned short * dst, float* src, int src_length);
+
+// returns samples written (or negative if there was a problem)
+int sfxr_Downsample(float * dst, int dst_length, float* src, int src_length, int dst_sample_rate, int src_sample_rate);
+
+int sfxr_Init(sfxr_Settings * dst);
+int sfxr_ModelInit(sfxr_Model * model, sfxr_Settings const* settings);
+int sfxr_DataInit(sfxr_Data * data, sfxr_Model const* model);
+
+// the library this is forked from always uses a sample rate of 44100
+// ergo divide by 44100 to get time in seconds.
+int sfxr_ComputeRemainingSamples(sfxr_Data const* data);
+
+// use one of buffer or short buffer to get samples out
+// 12 bits per sample is the limit of human hearing, but for mixing/editing etc you want full 32 bit floating samples.
+// for those purposes you should also use 192khz though; but this library can't do more than 44.1khz (the limit of human hearing is 40khz)
+int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, unsigned short * short_buffer);
+int sfxr_SettingsToJson(FILE *, sfxr_Settings * data);
+	
 enum sfxr_WaveType
 {
 	sfxr_Square,
@@ -77,10 +76,9 @@ enum sfxr_WaveType
 	sfxr_Sine,
 	sfxr_Noise
 };
-
+	
 struct sfxr_Settings
 {
-
 	enum sfxr_WaveType wave_type;
 
 
