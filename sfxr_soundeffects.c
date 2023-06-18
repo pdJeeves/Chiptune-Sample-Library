@@ -331,7 +331,7 @@ int sfxr_ComputeNoSamples(sfxr_Data const*__restrict data)
 		int which = limits[0] < limits[1]? 0 : 1;
 		which = limits[which] < limits[2]? which : 2;
 
-		if(model->fdslide >= 0 && fslide >= 1)
+		if(model->fdslide <= 0 && fslide <= 1)
 			limits[3] = ~(size_t)0;
 		else
 		{
