@@ -53,6 +53,7 @@ int sfxr_SettingsToJson(FILE *, sfxr_Settings * data);
 	
 // crush down to desired bit rate (creates PCM wave audio, so the uint8 isn't 2's compliment)
 // assumes dst is big enough
+// TODO: add SIMD	
 int sfxr_Quantize8(unsigned char * dst, float* src, int src_length);
 int sfxr_Quantize16(unsigned short * dst, float* src, int src_length);
 
@@ -70,7 +71,7 @@ int sfxr_ComputeRemainingSamples(sfxr_Data const* data);
 // use one of buffer or short buffer to get samples out
 // 12 bits per sample is the limit of human hearing, but for mixing/editing etc you want full 32 bit floating samples.
 // for those purposes you should also use 192khz though; but this library can't do more than 44.1khz (the limit of human hearing is 40khz)
-int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, unsigned short * short_buffer);
+int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer);
 
 	
 enum sfxr_WaveType
