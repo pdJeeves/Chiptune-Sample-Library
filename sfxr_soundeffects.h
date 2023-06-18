@@ -46,7 +46,11 @@ typedef struct sfxr_Data sfxr_Data;
 // sprintf filename convenience function
 	int sfxr_ExportWAV_F(sfxr_Settings const*, int wav_bits, int sample_rate, const char* filename_format, ...);
 #endif
-
+	
+// debug function used to view current state of the settings
+// i will not add a settings from json function.
+int sfxr_SettingsToJson(FILE *, sfxr_Settings * data);
+	
 // crush down to desired bit rate (creates PCM wave audio, so the uint8 isn't 2's compliment)
 // assumes dst is big enough
 int sfxr_Quantize8(unsigned char * dst, float* src, int src_length);
@@ -67,7 +71,7 @@ int sfxr_ComputeRemainingSamples(sfxr_Data const* data);
 // 12 bits per sample is the limit of human hearing, but for mixing/editing etc you want full 32 bit floating samples.
 // for those purposes you should also use 192khz though; but this library can't do more than 44.1khz (the limit of human hearing is 40khz)
 int sfxr_DataSynthSample(sfxr_Data * data, int length, float* buffer, unsigned short * short_buffer);
-int sfxr_SettingsToJson(FILE *, sfxr_Settings * data);
+
 	
 enum sfxr_WaveType
 {
@@ -77,46 +81,49 @@ enum sfxr_WaveType
 	sfxr_Noise
 };
 	
+
 struct sfxr_Settings
 {
 	enum sfxr_WaveType wave_type;
-
-
-//	float get_frequency_baseHz() const { float v = frequency.base; return internalToHz * (v * v + 0.001);  }
-//	void  set_frequency_baseHz(float v) { frequency.base = std::sqrt( v / internalToHz - 0.001);  }
-
+	
+// length of the sound effect is essentially attack + sustain + decay
+// but it can be cut off early by the frequency decaying below the frequency.limitHz
+// this is further affected by arpeggation which is further affected by retrigger
+// basically when making music change the sustainSec to make the note longer/shorter
 	struct {
-		float attackSec, // Attack is the beginning of the sound, longer attack means a smoother start.
-		sustainSec, // (0.6641 = 1 sec) Sustain is how long the volume is held constant before fading out.
-		decaySec, // Decay is the fade-out time.
-		punchPercent; // percentage
+		float attackSec; // Attack is the beginning of the sound, longer attack means a smoother start.
+		float sustainSec; // Sustain is how long the volume is held constant before fading out.
+		float decaySec; // Decay is the fade-out time.
+		float punchPercent; // percentage
 	} envelope;
 
 	struct
 	{
-		float baseHz,  // 0.35173364 = 440 Hz // Start frequency, has a large impact on the overall sound.
-		limitHz, //  represents a cutoff that stops all sound if it's passed during a downward slide.
-		slideOctaves_s, // Slide sets the speed at which the frequency should be swept (up or down).
-		slideOctaves_s2; // Delta slide is the "slide of slide", or rate of change in the slide speed.
+		float baseHz;  // Start frequency, has a large impact on the overall sound.
+		float limitHz; //  represents a cutoff that stops all sound if it's passed during a downward slide.
+		float slideOctaves_s; // Slide sets the speed at which the frequency should be swept (up or down).
+		float slideOctaves_s2; // Delta slide is the "slide of slide", or rate of change in the slide speed.
 	} frequency;
 
 	struct // Vibrato depth/speed makes for an oscillating frequency effect at various strengths and rates.
 	{
-		float strengthPercent, speedHz, delaySec;
+		float strengthPercent;
+		float speedHz;
+		float delaySec;
 	} vibrato;
 
 	struct
 	{
-		float frequencySemitones, // pitch change (up or down)
-		speedSec;  // Speed indicates time to wait before changing the pitch.
+		float frequencySemitones; // pitch change (up or down)
+		float speedSec;  // Speed indicates time to wait before changing the pitch.
 	} arpeggiation;
 
 // two parameters specific to the squarewave waveform
 	struct
 	{
 // The duty cycle of a square describes its shape in terms of how large the positive vs negative sections are.
-		float cyclePercent,
-		sweepPercent_sec;
+		float cyclePercent;
+		float sweepPercent_sec;
 	} duty;
 
 	struct
@@ -133,20 +140,23 @@ struct sfxr_Settings
 		// resulting in a kind of tight reverb or sci-fi effect.
 		// This parameter can also be swept like many others.
 
-		float offsetMs_sec, sweepMs_sec2;
+		float offsetMs_sec;
+		float sweepMs_sec2;
 	} flanger;
-
-	struct
-	{
-		float cutoffFrequencyHz, cuttofSweep_sec, resonancePercent;
-	} lowPassFilter;
 
 // control post processing effects
 	struct
 	{
-		float cutoffFrequencyHz, cuttofSweep_sec;
-	} highPassFilter;
+		float cutoffFrequencyHz;
+		float cuttofSweep_sec;
+		float resonancePercent;
+	} lowPassFilter;
 
+	struct
+	{
+		float cutoffFrequencyHz;
+		float cuttofSweep_sec;
+	} highPassFilter;
 };
 
 /*
