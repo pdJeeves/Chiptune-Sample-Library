@@ -11,7 +11,7 @@ Example of saving a file:
 	// the library never calls malloc, there is no memory management everything is stack based. 
 	sfxr_Settings settings;
 	sfxr_Coin(&settings)
-	sfxr_ExportWAV(&settings, "coin.wav");
+	sfxr_ExportWAV(&settings, /* bit rate */ 16, /* sample rate */ 44100, "coin.wav");
   
 Example of creating a new sound with FMOD using C++:
 
@@ -20,30 +20,23 @@ If you want to use unity then combine this example with this page here: https://
 	FMOD::Sound * CreateSound(FMOD::System * system, sfxr_Settings const& settings)
 	{
 		FMOD::Sound * sound = nullptr;
-		// the model is data used during sound generation that never changes, it can be used for multiple generators
-		// you're free to change the settings once you have the model
+	// the model is data used during sound generation that never changes, it can be used for multiple generators
+	// you're free to change the settings once you have the model
 		sfxr_Model model;
 		sfxr_ModelInit(&model, settings);
-		// the data is stuff that does change during sound generation, it can't be used among multiple instances
-		// it maintains a reference to the model, so the model can't be deleted until all the data is also.
+	// the data is stuff that does change during sound generation, it can't be used among multiple instances
+	// it maintains a reference to the model, so the model can't be deleted until all the data is also.
 		sfxr_Data  data;
 		sfxr_DataInit(&data, &model);
 		
-		std::vector<float> _samples;
+		std::vector<uint16_t> _samples;
+	// compute size of buffer we need 
+		_samples.resize(sfxr_ComputeRemainingSamples(&data));
 		
-		//make sample
-		while(data.playing_sample)
-		{
-			auto size = _samples.size();
-			_samples.resize(_samples.size() + 44100);
-			auto written = sfxr_DataSynthSample(&data, 44100, _samples.data());
-
-			if(written < 44100)
-			{
-				_samples.resize(size+written); // make it a tight fit!
-				break;
-			}
-		}
+	// synth as uint16 samples
+		sfxr_DataSynthSample(&data, _samples.size(), nullptr /* float samples */, _samples.data() /* short samples */);
+		
+	// done with this library now we use FMOD!!
 		
 	// we don't really need to create the whole buffer to make an FMOD sound but thats the easiest way to do it.
 	// it would be smarter to make a buffer about 1/2 a second long, or 20k samples and fill the lower half 
@@ -57,8 +50,8 @@ If you want to use unity then combine this example with this page here: https://
 		info.numchannels = 1;
 		info.defaultfrequency = 44100;
 		
-	// humans can't actually hear a difference between float and short data
-		info.format = FMOD_SOUND_FORMAT_PCMFLOAT;  
+	// humans can't actually hear a difference between float and short data (limit of hearing is 12 bits so 16 is already padded)
+		info.format = FMOD_SOUND_FORMAT_PCM16;  
 		
 		system->createSound(
 			nullptr,
